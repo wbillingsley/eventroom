@@ -6,8 +6,6 @@ import play.api.test.WithApplication
 
 import org.specs2.mutable._
 
-import akka.testkit.TestKit
-import scala.concurrent.duration._
 import scala.concurrent.ExecutionContext.Implicits.global
 
 
@@ -87,6 +85,32 @@ class EventRoomSpec extends Specification {
       )) must be equalTo(true)
       
     }
+    
+    "broadcast events over a websocket" in new WithApplication {
+       import scala.concurrent.Await
+       import scala.concurrent.duration._
+      
+       val er = new EventRoomGateway
+       val f = er.websocketTuple("aaa3", Mem(None), "sess3", "", LTNum(3))
+       val en = Enumerator.flatten(f.map(_._2))
 
+       en.verify(List(
+          j => {            
+            val connectedCheck = j == Json.obj("type" -> "connected", "listenerName" -> "aaa3")
+            
+            // Now we're connected, send the test message
+            er.default ! TestEvent("Ho-Di-Ho", 3)
+            connectedCheck
+          },
+          
+          // Member list
+          j => ((j \ "type").asOpt[String] == Some("members")) && ((j \ "members").as[List[String]] == List("Anonymous")),
+          
+          // Test message
+          _ == Json.obj("text" -> "Ho-Di-Ho")
+      )) must be equalTo(true)
+    }
+    
+    
   }
 }

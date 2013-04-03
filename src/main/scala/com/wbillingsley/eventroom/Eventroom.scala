@@ -73,6 +73,9 @@ case class MemberList(members: Iterable[Member]) extends EREvent {
     "date" -> Json.toJson(System.currentTimeMillis()))
 }
 
+/**
+ * Instantiate one of these for your EventRoom
+ */
 class EventRoomGateway {
 
   implicit val timeout = Timeout(1.second)
@@ -81,7 +84,19 @@ class EventRoomGateway {
     val roomActor = Akka.system.actorOf(Props[EventRoom])
     roomActor
   }
+  
+  /**
+   * Enumeratee for converting JSON events into format for Server Sent Events
+   */
+  val toEventSource = Enumeratee.map[JsValue] { msg =>
+    val d = "data: "+ msg.toString +"\n\n"
+    //val m = "" + d.length + "\n" + d
+    d
+  }
 
+  /**
+   * Join the event room, returning an enumerator of events as JSON objects
+   */
   def join(listenerName: String, member: Member, session: String, context: String, listenTo: ListenTo*) = {
     (default ? Join(listenerName, member, session, context, listenTo: _*)).map {
 
@@ -94,12 +109,54 @@ class EventRoomGateway {
   }
 
   def notifyEventRoom(e: EREvent) = default ! e
+  
+  /**
+   * Connects a listener to the event room and returns a (future) server sent event stream for that listener.
+   */
+  def serverSentEvents(listenerName:String, u:Member, session:String, context:String, lt:ListenTo*) = {
+    
+    import play.api.mvc.{ChunkedResult, ResponseHeader}
+    import play.api.http.HeaderNames
+    
+    val promise = join(listenerName, u, session, context, lt:_*)
+    promise.map(enumerator => {
+      /*
+       We pad the enumerator to send some initial data so that iOS will act upon the Connection: Close header
+       to ensure it does not pipeline other requests behind this one.  See HTTP Pipelining, Head Of Line blocking
+        */
+      val paddedEnumerator = Enumerator[JsValue](Json.toJson(Map("type" -> Json.toJson("ignore")))).andThen(enumerator)
+      val eventSource = paddedEnumerator &> toEventSource	          	         
+
+      // Apply the iteratee
+      val result = ChunkedResult[String](
+        header = ResponseHeader(play.api.http.Status.OK, Map(
+          HeaderNames.CONNECTION -> "close",
+          HeaderNames.CONTENT_LENGTH -> "-1",
+          HeaderNames.CONTENT_TYPE -> "text/event-stream"
+        )),
+        chunks = {iteratee:Iteratee[String, Unit] => eventSource.apply(iteratee) });
+      
+      result
+    })     
+  }
+  
+  /**
+   * Receives incoming events from WebSockets. Override this if you want to act on them.
+   */
+  def handleIncomingEvent(j:JsValue) = {}
+    
+  /**
+   * Connects a listener and returns a (Iteratee, Enumerator) tuple suitable for a Play websocket
+   */
+  def websocketTuple(listenerName:String, u:Member, session:String, context:String, lt:ListenTo*) = {      
+    val f = join(listenerName, u, session, context, lt:_*)
+    val jsIteratee = (Iteratee.foreach[JsValue] { j => handleIncomingEvent(j)})
+    f.map(e => (jsIteratee, e))
+  }  
 
 }
 
 class EventRoom extends Actor {
-
-
 
   /**
    * The members of the chat room and their streams
