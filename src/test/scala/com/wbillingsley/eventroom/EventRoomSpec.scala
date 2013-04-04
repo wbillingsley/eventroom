@@ -7,6 +7,7 @@ import play.api.test.WithApplication
 import org.specs2.mutable._
 
 import scala.concurrent.ExecutionContext.Implicits.global
+import com.wbillingsley.handy.Ref._
 
 
 import EnumeratorHelper._
@@ -23,8 +24,8 @@ class EventRoomSpec extends Specification {
   /** In our test, we can optionally subscribe anonymously (no user) */
   case class Mem(u: Option[User]) extends Member {
     def toJson = u match {
-      case Some(u) => Json.toJson(u.name)
-      case _ => Json.toJson("Anonymous")
+      case Some(u) => Some(Json.toJson(u.name))
+      case _ => Some(Json.toJson("Anonymous"))
     }
   }
   
@@ -33,7 +34,7 @@ class EventRoomSpec extends Specification {
   
   /** A test event to send */
   case class TestEvent(text: String, num:Int) extends EREvent {
-    override def toJson = Json.obj("text" -> text)
+    override def toJson = Json.obj("text" -> text).itself
     
     override def action(r:EventRoom) = {
       println("Actioning " + this)

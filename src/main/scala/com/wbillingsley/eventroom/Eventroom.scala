@@ -16,15 +16,28 @@ import play.api.libs.iteratee.Concurrent.Channel
 import play.api.Play.current
 
 import com.wbillingsley.handy._
+import Ref._
+
+import scala.language.reflectiveCalls
 
 /**
  * A member of the EventRoom. Wrap your user class in one of these
  */
 trait Member {
   /**
-   * The JSON you want to appear for each member in the list of those in the room
+   * The JSON you want to appear for each member in the list of those in the room.
+   * 
+   * This is defined to return Option not Ref to avoid a performance trap: if turning a 
+   * Mem to JSON involved a future (particularly if it involved a database lookup)
+   * then every time a new person joins the event room, each of the other members
+   * would end up being looked up individually -- which could total many trips to the
+   * database.
+   * 
+   * If I ever find a need to look up Mem's on demand (rather than just keeping the
+   * few details we might want to show in the presence list in memory) then I'll 
+   * revisit how this can be done more efficiently.
    */
-  def toJson:JsValue
+  def toJson:Option[JsValue]
 }
 
 /** A key saying what the listener is listening to */
@@ -37,7 +50,12 @@ abstract class State
 
 /** Type of event sent in the room. */
 abstract class EREvent {
-  def toJson: JsValue = Json.obj("unexpected" -> "This event would not normally be broadcast")
+  
+  /** 
+   * Override this to give a JSON representation of your event.
+   * As this is defined as a Ref[JsValue], it can be a RefFuture, etc. 
+   */
+  def toJson: Ref[JsValue] = RefNone
 
   /** The action the EventRoom should perform when it receives this event. */
   def action(room: EventRoom) {
@@ -62,15 +80,23 @@ case class Connected(listenerName: String, enumerator: Enumerator[JsValue]) exte
 
 /** Can't connect */
 case class CannotConnect(msg: String) extends EREvent {
-  override def toJson = Json.obj("error" -> msg)
+  
+  def json = Json.obj("error" -> msg)
+  
+  override def toJson = json.itself
 }
 
 /** Who else is in the same event room. */
 case class MemberList(members: Iterable[Member]) extends EREvent {
-  override def toJson = Json.obj(
-    "type" -> JsString("members"),
-    "members" -> Json.toJson(members.map(r => r.toJson)),
-    "date" -> Json.toJson(System.currentTimeMillis()))
+  override def toJson = {
+    val memberlist = (for (m <- members; mj <- m.toJson) yield mj)
+    
+    Json.obj(
+      "type" -> JsString("members"),
+      "members" -> memberlist.toStream,
+      "date" -> Json.toJson(System.currentTimeMillis())      
+    ).itself
+  }
 }
 
 /**
@@ -104,7 +130,7 @@ class EventRoomGateway {
 
       case CannotConnect(error) =>
         // Send an error and close the socket
-        Enumerator[JsValue](CannotConnect(error).toJson).andThen(Enumerator.enumInput(Input.EOF))
+        Enumerator[JsValue](CannotConnect(error).json).andThen(Enumerator.enumInput(Input.EOF))
     }
   }
 
@@ -209,7 +235,7 @@ class EventRoom extends Actor {
       val enumerator = Concurrent.unicast[JsValue](
         onStart = { channel =>
           if (members.contains(ej.listenerName)) {
-            channel push CannotConnect("This username is already used").toJson
+            channel push CannotConnect("This username is already used").json
           } else {
             members = members + (ej.listenerName -> channel)
             memberJoins = memberJoins + (ej.listenerName -> ej)
@@ -261,9 +287,8 @@ class EventRoom extends Actor {
    * Sends an event out to everyone who is listening to the same thing
    */
   def broadcast(key: ListenTo, event: EREvent) {
-    val json = event.toJson
-
     for (
+      json <- event.toJson;
       listenerSet <- subscribers.get(key);
       listenerName <- listenerSet;
       listener <- members.get(listenerName)
