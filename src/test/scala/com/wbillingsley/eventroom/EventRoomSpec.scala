@@ -14,6 +14,8 @@ import EnumeratorHelper._
 
 class EventRoomSpec extends Specification {
   
+  sequential
+  
   /** Users for our test */
   case class User(name:String)
   
@@ -49,15 +51,22 @@ class EventRoomSpec extends Specification {
       
       val er = new EventRoomGateway
       
-      val enum = Enumerator.flatten(er.join("aaa1", Mem(Some(bertie)), "sess1", "", LTNum(1)))      
-      er.default ! Quit("aaa1")
+      val enum = er.join("aaa1", Mem(Some(bertie)), "sess1", "", LTNum(1))
       
-      enum.verify(List(
+      enum.andThen(Enumerator.eof).verify(List(
           // Connected
           _ == Json.obj("type" -> "connected", "listenerName" -> "aaa1"),
           
           // Member list
-          j => ((j \ "type").asOpt[String] == Some("members")) && ((j \ "members").as[List[String]] == List("Bertram Wooster")) 
+          j => {
+            
+            val checked = ((j \ "type").asOpt[String] == Some("members")) && ((j \ "members").as[List[String]] == List("Bertram Wooster"))
+            
+            // Send the quit message after receiving the member list
+            er.default ! Quit("aaa1")
+      
+            checked
+          }
       )) must be equalTo(true)
       
     }
@@ -67,22 +76,27 @@ class EventRoomSpec extends Specification {
       
       val er = new EventRoomGateway
       
-      val enum = Enumerator.flatten(er.join("aaa2", Mem(Some(algernon)), "sess2", "", LTNum(2)))      
+      val enum = er.join("aaa2", Mem(Some(algernon)), "sess2", "", LTNum(2))      
       
       enum.verify(List(
-          j => {            
-            val connectedCheck = j == Json.obj("type" -> "connected", "listenerName" -> "aaa2")
-            
+          _ == {                        
             // Now we're connected, send the test message
             er.default ! TestEvent("Hi-De-Hi", 2)
-            connectedCheck
+            
+            // And check it really was the connected message
+            Json.obj("type" -> "connected", "listenerName" -> "aaa2")
           },
           
           // Member list
           j => ((j \ "type").asOpt[String] == Some("members")) && ((j \ "members").as[List[String]] == List("Algernon Moncrieff")),
           
           // Test message
-          _ == Json.obj("text" -> "Hi-De-Hi")
+          _ == {
+            er.default ! Quit("aaa2")
+            
+            // And check it really was the test message
+            Json.obj("text" -> "Hi-De-Hi")
+          }
       )) must be equalTo(true)
       
     }
@@ -93,22 +107,27 @@ class EventRoomSpec extends Specification {
       
        val er = new EventRoomGateway
        val f = er.websocketTuple("aaa3", Mem(None), "sess3", "", LTNum(3))
-       val en = Enumerator.flatten(f.map(_._2))
+       val en = f.map(_._2)
 
        en.verify(List(
-          j => {            
-            val connectedCheck = j == Json.obj("type" -> "connected", "listenerName" -> "aaa3")
+          _ == {            
             
             // Now we're connected, send the test message
             er.default ! TestEvent("Ho-Di-Ho", 3)
-            connectedCheck
+            
+            // And check the received event really was the connected message
+            Json.obj("type" -> "connected", "listenerName" -> "aaa3")            
           },
           
           // Member list
           j => ((j \ "type").asOpt[String] == Some("members")) && ((j \ "members").as[List[String]] == List("Anonymous")),
           
           // Test message
-          _ == Json.obj("text" -> "Ho-Di-Ho")
+          _ == {
+            er.default ! Quit("aaa3")
+            
+            Json.obj("text" -> "Ho-Di-Ho")
+          }
       )) must be equalTo(true)
     }
     

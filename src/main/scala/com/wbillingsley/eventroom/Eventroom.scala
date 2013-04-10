@@ -66,7 +66,7 @@ abstract class EREvent {
 /** 
  * Joining the event room.  Note that context is not used, but is kept as it may be useful for debugging. 
  */
-case class Join(listenerName: String, member: Member, session: String, context: String, listenTo: ListenTo*) extends EREvent
+case class Join(listenerName: String, member: Member, session: String, context: String, channel:Channel[JsValue], listenTo: ListenTo*) extends EREvent
 
 case class Subscribe(listenerName: String, listenTo: ListenTo) extends EREvent
 
@@ -76,7 +76,12 @@ case class Unsubscribe(listenerName: String, listenTo: ListenTo) extends EREvent
 case class Quit(listenerName: String) extends EREvent
 
 /** Successfully connected, returning an enumerator of the broadcast events. */
-case class Connected(listenerName: String, enumerator: Enumerator[JsValue]) extends EREvent
+case class Connected(listenerName: String) extends EREvent {
+  
+  def json = Json.obj("type" -> "connected", "listenerName" -> listenerName)
+  
+  override def toJson = json.itself
+}
 
 /** Can't connect */
 case class CannotConnect(msg: String) extends EREvent {
@@ -124,46 +129,47 @@ class EventRoomGateway {
    * Join the event room, returning an enumerator of events as JSON objects
    */
   def join(listenerName: String, member: Member, session: String, context: String, listenTo: ListenTo*) = {
-    (default ? Join(listenerName, member, session, context, listenTo: _*)).map {
-
-      case Connected(listenerName, enumerator) => enumerator
-
-      case CannotConnect(error) =>
-        // Send an error and close the socket
-        Enumerator[JsValue](CannotConnect(error).json).andThen(Enumerator.enumInput(Input.EOF))
-    }
+    
+    val enumerator = Concurrent.unicast[JsValue](
+      onStart = { channel =>
+        default ! Join(listenerName, member, session, context, channel, listenTo: _*)
+      },
+      onComplete = {
+        println("Channel complete for " + listenerName)
+        default ! Quit(listenerName) 
+      },
+      onError = (string, input) => println("Error " + string)
+    )
+    enumerator
   }
 
   def notifyEventRoom(e: EREvent) = default ! e
-  
+
   /**
    * Connects a listener to the event room and returns a (future) server sent event stream for that listener.
    */
-  def serverSentEvents(listenerName:String, u:Member, session:String, context:String, lt:ListenTo*) = {
-    
-    import play.api.mvc.{ChunkedResult, ResponseHeader}
+  def serverSentEvents(listenerName: String, u: Member, session: String, context: String, lt: ListenTo*) = {
+
+    import play.api.mvc.{ ChunkedResult, ResponseHeader }
     import play.api.http.HeaderNames
-    
-    val promise = join(listenerName, u, session, context, lt:_*)
-    promise.map(enumerator => {
-      /*
+
+    val enumerator = join(listenerName, u, session, context, lt: _*)
+    /*
        We pad the enumerator to send some initial data so that iOS will act upon the Connection: Close header
        to ensure it does not pipeline other requests behind this one.  See HTTP Pipelining, Head Of Line blocking
         */
-      val paddedEnumerator = Enumerator[JsValue](Json.toJson(Map("type" -> Json.toJson("ignore")))).andThen(enumerator)
-      val eventSource = paddedEnumerator &> toEventSource	          	         
+    val paddedEnumerator = Enumerator[JsValue](Json.toJson(Map("type" -> Json.toJson("ignore")))).andThen(enumerator)
+    val eventSource = paddedEnumerator &> toEventSource
 
-      // Apply the iteratee
-      val result = ChunkedResult[String](
-        header = ResponseHeader(play.api.http.Status.OK, Map(
-          HeaderNames.CONNECTION -> "close",
-          HeaderNames.CONTENT_LENGTH -> "-1",
-          HeaderNames.CONTENT_TYPE -> "text/event-stream"
-        )),
-        chunks = {iteratee:Iteratee[String, Unit] => eventSource.apply(iteratee) });
-      
-      result
-    })     
+    // Apply the iteratee
+    val result = ChunkedResult[String](
+      header = ResponseHeader(play.api.http.Status.OK, Map(
+        HeaderNames.CONNECTION -> "close",
+        HeaderNames.CONTENT_LENGTH -> "-1",
+        HeaderNames.CONTENT_TYPE -> "text/event-stream")),
+      chunks = { iteratee: Iteratee[String, Unit] => eventSource.apply(iteratee) });
+
+    result
   }
   
   /**
@@ -231,25 +237,22 @@ class EventRoom extends Actor {
   def receive = {
 
     case ej: Join => {
+      
+      println("JOIN RECEIVED " + ej.listenerName)
 
-      val enumerator = Concurrent.unicast[JsValue](
-        onStart = { channel =>
-          if (members.contains(ej.listenerName)) {
-            channel push CannotConnect("This username is already used").json
-          } else {
-            members = members + (ej.listenerName -> channel)
-            memberJoins = memberJoins + (ej.listenerName -> ej)
-
-            // Push out the name of the listener
-            channel push Json.obj("type" -> "connected", "listenerName" -> ej.listenerName)
-
-            for (lt <- ej.listenTo) {
-              subscribe(ej.listenerName, lt)
-            }
-          }
-        },
-        onComplete = { self.!(Quit(ej.listenerName)) })
-      sender ! Connected(ej.listenerName, enumerator)
+      if (members.contains(ej.listenerName)) {
+        ej.channel push CannotConnect("This username is already used").json
+      } else {
+        members = members + (ej.listenerName -> ej.channel)
+        memberJoins = memberJoins + (ej.listenerName -> ej)
+        
+        ej.channel push Connected(ej.listenerName).json
+        
+        for (lt <- ej.listenTo) {
+          subscribe(ej.listenerName, lt)
+        }
+        
+      }
 
     }
 
@@ -261,8 +264,12 @@ class EventRoom extends Actor {
 
     // Quit the room 
     case Quit(listenerName) => {
-      val ch = members.get(listenerName)
+      
+      println("QUIT RECEIVED " + listenerName)
 
+      val ch = members.get(listenerName)
+      println("CH " + ch)
+      
       members = members - listenerName
       memberJoins = memberJoins - listenerName
 
@@ -273,7 +280,10 @@ class EventRoom extends Actor {
       }
       subscriptions = subscriptions - listenerName
       
-      for (channel <- ch) channel.end
+      for (channel <- ch) {
+        println("ENDING")
+        channel.end
+      }
     }
 
     // For other events, do what the event says

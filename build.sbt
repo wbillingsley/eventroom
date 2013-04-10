@@ -20,10 +20,10 @@ publishTo <<= version { (v: String) =>
 
 parallelExecution in Test := false
 
-libraryDependencies += "com.typesafe.akka" %% "akka-actor" % "2.1.0"
+libraryDependencies += "com.typesafe.akka" %% "akka-actor" % "2.1.1"
 
-libraryDependencies += "play" %% "play" % "2.1.0"
+libraryDependencies += "play" %% "play" % "2.1.1"
 
 libraryDependencies += "com.wbillingsley" %% "handy" % "0.4-SNAPSHOT"
 
-libraryDependencies += "play" %% "play-test" % "2.1.0" % "test"
+libraryDependencies += "play" %% "play-test" % "2.1.1" % "test"
