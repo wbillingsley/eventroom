@@ -41,15 +41,15 @@ trait Member {
 }
 
 /** A key saying what the listener is listening to */
-abstract class ListenTo {
+trait ListenTo {
   def onSubscribe(listenerName: String, room: EventRoom) = { /* do nothing */ }
 }
 
 /** A bit of state that events can update */
-abstract class State
+trait State
 
 /** Type of event sent in the room. */
-abstract class EREvent {
+trait EREvent {
   
   /** 
    * Override this to give a JSON representation of your event.
@@ -157,6 +157,9 @@ class EventRoomGateway {
     /*
        We pad the enumerator to send some initial data so that iOS will act upon the Connection: Close header
        to ensure it does not pipeline other requests behind this one.  See HTTP Pipelining, Head Of Line blocking
+        
+       UPDATE: A Heroku issue means I've experimentally changed the content headers as below, dropping "Content-Length: -1" 
+       changing to "Connection: keep-alive"  
         */
     val paddedEnumerator = Enumerator[JsValue](Json.toJson(Map("type" -> Json.toJson("ignore")))).andThen(enumerator)
     val eventSource = paddedEnumerator &> toEventSource
@@ -165,7 +168,7 @@ class EventRoomGateway {
     val result = ChunkedResult[String](
       header = ResponseHeader(play.api.http.Status.OK, Map(
         HeaderNames.CONNECTION -> "close",
-        HeaderNames.CONTENT_LENGTH -> "-1",
+        HeaderNames.CACHE_CONTROL -> "no-cache",
         HeaderNames.CONTENT_TYPE -> "text/event-stream")),
       chunks = { iteratee: Iteratee[String, Unit] => eventSource.apply(iteratee) });
 
