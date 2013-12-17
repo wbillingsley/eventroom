@@ -43,6 +43,8 @@ trait Member {
 /** A key saying what the listener is listening to */
 trait ListenTo {
   def onSubscribe(listenerName: String, room: EventRoom) = { /* do nothing */ }
+  
+  def onUnsubscribe(listenerName: String, room: EventRoom) = { /* do nothing */ }
 }
 
 /** A bit of state that events can update */
@@ -56,6 +58,8 @@ trait EREvent {
    * As this is defined as a Ref[JsValue], it can be a RefFuture, etc. 
    */
   def toJson: Ref[JsValue] = RefNone
+  
+  def toJsonFor(m:Member) = toJson
 
   /** The action the EventRoom should perform when it receives this event. */
   def action(room: EventRoom) {
@@ -66,7 +70,7 @@ trait EREvent {
 /** 
  * Joining the event room.  Note that context is not used, but is kept as it may be useful for debugging. 
  */
-case class Join(listenerName: String, member: Member, session: String, context: String, channel:Channel[JsValue], listenTo: ListenTo*) extends EREvent
+case class Join(listenerName: String, member: Member, session: String, context: String, channel:Channel[EREvent], listenTo: ListenTo*) extends EREvent
 
 case class Subscribe(listenerName: String, listenTo: ListenTo) extends EREvent
 
@@ -77,18 +81,12 @@ case class Quit(listenerName: String) extends EREvent
 
 /** Successfully connected, returning an enumerator of the broadcast events. */
 case class Connected(listenerName: String) extends EREvent {
-  
-  def json = Json.obj("type" -> "connected", "listenerName" -> listenerName)
-  
-  override def toJson = json.itself
+  override val toJson = Json.obj("type" -> "connected", "listenerName" -> listenerName).itself
 }
 
 /** Can't connect */
 case class CannotConnect(msg: String) extends EREvent {
-  
-  def json = Json.obj("error" -> msg)
-  
-  override def toJson = json.itself
+  override val toJson = Json.obj("error" -> msg).itself
 }
 
 /** Who else is in the same event room. */
@@ -126,21 +124,39 @@ class EventRoomGateway {
   }
 
   /**
-   * Join the event room, returning an enumerator of events as JSON objects
+   * Join the event room, returning an enumerator of events
    */
   def join(listenerName: String, member: Member, session: String, context: String, listenTo: ListenTo*) = {
     
-    val enumerator = Concurrent.unicast[JsValue](
+    val enumerator = Concurrent.unicast[EREvent](
       onStart = { channel =>
         default ! Join(listenerName, member, session, context, channel, listenTo: _*)
       },
       onComplete = {
-        println("Channel complete for " + listenerName)
         default ! Quit(listenerName) 
       },
-      onError = (string, input) => println("Error " + string)
+      onError = (string, input) => {
+        println("Error " + string)
+        default ! Quit(listenerName) 
+      }
     )
     enumerator
+  }
+  
+  /**
+   * Join the event room, returning an enumerator of JSON values
+   */  
+  def joinJson(listenerName: String, member: Member, session: String, context: String, listenTo: ListenTo*) = {
+    import com.wbillingsley.handyplay.RefEnumerator
+    import com.wbillingsley.handyplay.RefConversions._
+    val enumerator = join(listenerName, member, session, context, listenTo: _*)
+    
+    //val j = enumerator flatMap (_.toJsonFor(member).enumerate)
+    (for {
+      e <- new RefEnumerator(enumerator)
+      j <- e.toJsonFor(member)
+    } yield j).enumerate
+    //j
   }
 
   def notifyEventRoom(e: EREvent) = default ! e
@@ -150,10 +166,11 @@ class EventRoomGateway {
    */
   def serverSentEvents(listenerName: String, u: Member, session: String, context: String, lt: ListenTo*) = {
 
-    import play.api.mvc.{ ChunkedResult, ResponseHeader }
+    import play.api.mvc.{ Results, ResponseHeader }
     import play.api.http.HeaderNames
 
-    val enumerator = join(listenerName, u, session, context, lt: _*)
+    val enumerator = joinJson(listenerName, u, session, context, lt: _*)
+    
     /*
        We pad the enumerator to send some initial data so that iOS will act upon the Connection: Close header
        to ensure it does not pipeline other requests behind this one.  See HTTP Pipelining, Head Of Line blocking
@@ -165,13 +182,12 @@ class EventRoomGateway {
     val eventSource = paddedEnumerator &> toEventSource
 
     // Apply the iteratee
-    val result = ChunkedResult[String](
-      header = ResponseHeader(play.api.http.Status.OK, Map(
+    val result = Results.Ok.chunked[String](eventSource).withHeaders(
         HeaderNames.CONNECTION -> "close",
         HeaderNames.CACHE_CONTROL -> "no-cache",
-        HeaderNames.CONTENT_TYPE -> "text/event-stream")),
-      chunks = { iteratee: Iteratee[String, Unit] => eventSource.apply(iteratee) });
-
+        HeaderNames.CONTENT_TYPE -> "text/event-stream"
+      )
+      
     result
   }
   
@@ -184,7 +200,7 @@ class EventRoomGateway {
    * Connects a listener and returns a (Iteratee, Enumerator) tuple suitable for a Play websocket
    */
   def websocketTuple(listenerName:String, u:Member, session:String, context:String, lt:ListenTo*) = {      
-    val f = join(listenerName, u, session, context, lt:_*)
+    val f = joinJson(listenerName, u, session, context, lt:_*)
     val jsIteratee = (Iteratee.foreach[JsValue] { j => handleIncomingEvent(j)})
     f.map(e => (jsIteratee, e))
   }  
@@ -196,7 +212,7 @@ class EventRoom extends Actor {
   /**
    * The members of the chat room and their streams
    */
-  var members = Map.empty[String, Channel[JsValue]]
+  var members = Map.empty[String, Channel[EREvent]]
 
   /**
    * A map of listenTo -> listenerName
@@ -225,7 +241,6 @@ class EventRoom extends Actor {
     subscribers = subscribers.updated(listenTo, subscribers.getOrElse(listenTo, Set.empty[String]) + listenerName)
     subscriptions = subscriptions.updated(listenerName, subscriptions.getOrElse(listenerName, Set.empty[ListenTo]) + listenTo)
     listenTo.onSubscribe(listenerName, this)
-    broadcast(listenTo, MemberList(membersByLT(listenTo)))
   }
 
   /**
@@ -234,22 +249,20 @@ class EventRoom extends Actor {
   private def unsubscribe(listenerName: String, listenTo: ListenTo) {
     subscribers = subscribers.updated(listenTo, subscribers.getOrElse(listenTo, Set.empty[String]) - listenerName)
     subscriptions = subscriptions.updated(listenerName, subscriptions.getOrElse(listenerName, Set.empty[ListenTo]) - listenTo)
-    broadcast(listenTo, MemberList(membersByLT(listenTo)))
+    listenTo.onUnsubscribe(listenerName, this)
   }
 
   def receive = {
 
     case ej: Join => {
       
-      println("JOIN RECEIVED " + ej.listenerName)
-
       if (members.contains(ej.listenerName)) {
-        ej.channel push CannotConnect("This username is already used").json
+        ej.channel push CannotConnect("This username is already used")
       } else {
         members = members + (ej.listenerName -> ej.channel)
         memberJoins = memberJoins + (ej.listenerName -> ej)
         
-        ej.channel push Connected(ej.listenerName).json
+        ej.channel push Connected(ej.listenerName)
         
         for (lt <- ej.listenTo) {
           subscribe(ej.listenerName, lt)
@@ -268,10 +281,7 @@ class EventRoom extends Actor {
     // Quit the room 
     case Quit(listenerName) => {
       
-      println("QUIT RECEIVED " + listenerName)
-
       val ch = members.get(listenerName)
-      println("CH " + ch)
       
       members = members - listenerName
       memberJoins = memberJoins - listenerName
@@ -284,7 +294,6 @@ class EventRoom extends Actor {
       subscriptions = subscriptions - listenerName
       
       for (channel <- ch) {
-        println("ENDING")
         channel.end
       }
     }
@@ -301,12 +310,11 @@ class EventRoom extends Actor {
    */
   def broadcast(key: ListenTo, event: EREvent) {
     for (
-      json <- event.toJson;
       listenerSet <- subscribers.get(key);
       listenerName <- listenerSet;
       listener <- members.get(listenerName)
     ) {
-      listener.push(json)
+      listener.push(event)
     }
   }
 

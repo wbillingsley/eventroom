@@ -10,8 +10,12 @@ import scala.concurrent.ExecutionContext.Implicits.global
 import com.wbillingsley.handy.Ref._
 
 
-import EnumeratorHelper._
+import com.wbillingsley.handyplay.EnumeratorHelper._
 
+import org.junit.runner.RunWith
+import org.specs2.runner.JUnitRunner
+ 
+@RunWith(classOf[JUnitRunner])
 class EventRoomSpec extends Specification {
   
   sequential
@@ -32,7 +36,13 @@ class EventRoomSpec extends Specification {
   }
   
   /** In our test, the channels are just numbers. */
-  case class LTNum(num:Int) extends ListenTo
+  case class LTNum(num:Int) extends ListenTo {
+    
+    override def onSubscribe(ln:String, room:EventRoom) {
+      room.broadcast(this, MemberList(room.membersByLT(this)))
+    }
+    
+  }
   
   /** A test event to send */
   case class TestEvent(text: String, num:Int) extends EREvent {
@@ -44,6 +54,23 @@ class EventRoomSpec extends Specification {
     }
   }
 
+  
+  
+  def hilf[E](checks: (E) => Boolean*) = {
+    var ch = checks
+    val en = Enumeratee.map[E] { x => 
+      if (ch.head(x)) {
+        println("checked " + x)
+        ch = ch.tail
+        true
+      } else {
+        println("failed " + x)
+        throw new RuntimeException("Didn't meet expectation on " + x)
+      }
+    }
+    val bool = Iteratee.fold[Boolean, Boolean](true)(_ && _)
+    en transform bool
+  }
 
   "EventRoom" should {
 
@@ -51,15 +78,19 @@ class EventRoomSpec extends Specification {
       
       val er = new EventRoomGateway
       
-      val enum = er.join("aaa1", Mem(Some(bertie)), "sess1", "", LTNum(1))
+      val enum = er.joinJson("aaa1", Mem(Some(bertie)), "sess1", "", LTNum(1))
       
-      enum.andThen(Enumerator.eof).verify(List(
+      val v = (enum |>>> hilf(
           // Connected
-          _ == Json.obj("type" -> "connected", "listenerName" -> "aaa1"),
+          j => {
+            println("Checking " + j.toString)
+            
+            j == Json.obj("type" -> "connected", "listenerName" -> "aaa1")
+          },
           
           // Member list
           j => {
-            
+            println("Checking " + j.toString)            
             val checked = ((j \ "type").asOpt[String] == Some("members")) && ((j \ "members").as[List[String]] == List("Bertram Wooster"))
             
             // Send the quit message after receiving the member list
@@ -67,18 +98,16 @@ class EventRoomSpec extends Specification {
       
             checked
           }
-      )) must be equalTo(true)
-      
+      )) must be_==(true).await
     }
-
 
     "broadcast events on the subscribed channel" in new WithApplication {
       
       val er = new EventRoomGateway
       
-      val enum = er.join("aaa2", Mem(Some(algernon)), "sess2", "", LTNum(2))      
+      val enum = er.joinJson("aaa2", Mem(Some(algernon)), "sess2", "", LTNum(2))      
       
-      enum.verify(List(
+      enum.verify(
           _ == {                        
             // Now we're connected, send the test message
             er.default ! TestEvent("Hi-De-Hi", 2)
@@ -97,7 +126,7 @@ class EventRoomSpec extends Specification {
             // And check it really was the test message
             Json.obj("text" -> "Hi-De-Hi")
           }
-      )) must be equalTo(true)
+      ) must be_==(true).await
       
     }
     
@@ -109,7 +138,7 @@ class EventRoomSpec extends Specification {
        val f = er.websocketTuple("aaa3", Mem(None), "sess3", "", LTNum(3))
        val en = f.map(_._2)
 
-       en.verify(List(
+       en.verify(
           _ == {            
             
             // Now we're connected, send the test message
@@ -128,7 +157,7 @@ class EventRoomSpec extends Specification {
             
             Json.obj("text" -> "Ho-Di-Ho")
           }
-      )) must be equalTo(true)
+      ) must be_==(true).await
     }
     
     

@@ -20,6 +20,8 @@ libraryDependencies += "com.typesafe.play" %% "play" % "2.2.1"
 
 libraryDependencies += "com.wbillingsley" %% "handy" % "0.5-SNAPSHOT"
 
+libraryDependencies += "com.wbillingsley" %% "handy-play" % "0.5-SNAPSHOT"
+
 libraryDependencies += "com.typesafe.play" %% "play-test" % "2.2.1" % "test"
 
 
