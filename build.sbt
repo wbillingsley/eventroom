@@ -2,15 +2,17 @@ name := "eventroom"
 
 organization := "com.wbillingsley"
 
-version := "0.1-SNAPSHOT"
+version := "0.1.0-RC1"
 
-scalaVersion := "2.10.2"
+scalaVersion := "2.10.3"
 
 scalacOptions ++= Seq("-unchecked", "-deprecation", "-feature")
 
-crossScalaVersions := Seq("2.10.2")
+crossScalaVersions := Seq("2.10.3")
 
 parallelExecution in Test := false
+
+resolvers += "bintrayW" at "http://dl.bintray.com/wbillingsley/maven"
 
 resolvers += Resolver.sonatypeRepo("snapshots")
 
@@ -18,25 +20,28 @@ libraryDependencies += "com.typesafe.akka" %% "akka-actor" % "2.1.1"
 
 libraryDependencies += "com.typesafe.play" %% "play" % "2.2.1"
 
-libraryDependencies += "com.wbillingsley" %% "handy" % "0.5-SNAPSHOT"
+libraryDependencies += "com.wbillingsley" %% "handy" % "0.5.0-RC1"
 
-libraryDependencies += "com.wbillingsley" %% "handy-play" % "0.5-SNAPSHOT"
+libraryDependencies += "com.wbillingsley" %% "handy-play" % "0.5.0-RC1"
 
 libraryDependencies += "com.typesafe.play" %% "play-test" % "2.2.1" % "test"
 
 
-licenses in ThisBuild := Seq("MIT License" -> url("http://www.opensource.org/licenses/mit-license.php"))
+licenses in ThisBuild := Seq("MIT" -> url("http://www.opensource.org/licenses/mit-license.php"))
 
 homepage in ThisBuild := Some(url("http://github.com/wbillingsley/eventroom"))
 
 publishMavenStyle in ThisBuild := true
 
-publishTo in ThisBuild <<= version { (v: String) =>
+// Bintray settings for publishing releases
+seq(bintrayPublishSettings:_*)
+
+publishTo in ThisBuild := {
   val nexus = "https://oss.sonatype.org/"
-  if (v.trim.endsWith("SNAPSHOT"))
+  if (version.value.trim.endsWith("SNAPSHOT"))
     Some("snapshots" at nexus + "content/repositories/snapshots")
   else
-    Some("releases"  at nexus + "service/local/staging/deploy/maven2")
+    publishTo.value
 }
 
 parallelExecution in Test := false
