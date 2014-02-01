@@ -287,12 +287,12 @@ class EventRoom extends Actor {
       memberJoins = memberJoins - listenerName
 
       // Unsubscribe this listener from all streams
+      subscriptions = subscriptions - listenerName
       for (subscription <- subscriptions.getOrElse(listenerName, Set.empty[ListenTo])) {
         subscribers = subscribers.updated(subscription, subscribers.getOrElse(subscription, Set.empty[String]) - listenerName)
-        broadcast(subscription, MemberList(membersByLT(subscription)))
+        subscription.onUnsubscribe(listenerName, this)
       }
-      subscriptions = subscriptions - listenerName
-      
+
       for (channel <- ch) {
         channel.end
       }
